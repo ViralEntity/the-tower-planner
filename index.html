@@ -362,14 +362,22 @@ function parseLabRows(rows, isRegen) {
   return out;
 }
 
-// Parse WS tab — col Q(16), R(17), S(18) from row 6
+// Parse WS tab — enhancement sequence starting at col Q (index 16)
+// The API only returns columns up to the last non-empty cell, so rows may be
+// shorter than 19 cols even if the data is in Q:S. We fetch A6:S so the
+// Google Sheets API always pads to the requested width — but if a row has no
+// data in cols Q-S those cells are simply omitted from the array.
+// Safe approach: if row[16] is empty, skip. Never crash on short rows.
 function parseWsRows(rows) {
   const out = [];
+  if (!rows || rows.length === 0) return out;
   for (const row of rows) {
-    const name = String(row[16]||'').trim();
+    if (!row || row.length < 17) continue;          // row doesn't reach col Q
+    const name = String(row[16] || '').trim();
     if (!name || name.startsWith('=')) continue;
     const level = parseInt(row[17]) || 0;
-    const cost = parseCoinStr(row[18]);
+    const costRaw = row.length > 18 ? row[18] : '';
+    const cost = parseCoinStr(costRaw);
     if (!cost) continue;
     out.push({ name, level, cost });
   }
@@ -398,7 +406,7 @@ async function handleRefresh(btn) {
       { label: 'eHP (2/5)',          sheetId: cfg.labsId, range: 'eHP!A6:J'            },
       { label: 'eRegen (3/5)',       sheetId: cfg.labsId, range: 'eRegen!A6:H'         },
       { label: 'eDamage (4/5)',      sheetId: cfg.labsId, range: 'eDamage!A6:J'        },
-      { label: 'Workshop (5/5)',     sheetId: cfg.wsId,   range: 'Desired Ratios!A6:S' },
+      { label: 'Workshop (5/5)',     sheetId: cfg.wsId,   range: "'Desired Ratios'!A6:S" },
     ];
     const results = [];
     for (const tab of tabs) {
