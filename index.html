@@ -605,40 +605,63 @@ function recalculate() {
   const labFinishTime={eEcon:{},eHP:{},eRegen:{},eDamage:{}};
   const labEvents=[];
 
+  // Key for finish time tracking — lab name + level ensures each level is tracked independently
+  function labKey(item){return item.lab+'::'+item.level;}
+
   function scoreItem(item,path){return item.roi*getPathWeight(path);}
+
+  // Get the finish time of the PREVIOUS level of the same lab (prerequisite)
+  function prereqFinishTime(path, data, idx) {
+    if(idx===0) return 0;
+    const prev=data[idx-1];
+    // Only a prereq if same lab name and level is exactly one less
+    if(prev && prev.lab===data[idx].lab) {
+      return labFinishTime[path][labKey(prev)] || 0;
+    }
+    return 0;
+  }
+
   function headCandidates(slotFreeAt){
     const out=[];
     pathKeys.forEach(path=>{
       const data=LAB_DATA[path]; const basePtr=ptrs[path];
       for(let offset=0;offset<40;offset++){
         const idx=basePtr+offset; if(idx>=data.length)break;
-        const item=data[idx]; const locked=labFinishTime[path][item.lab]||0;
-        if(locked>slotFreeAt)continue;
-        if(offset>0){const prev=data[idx-1];if(prev&&prev.lab===item.lab)continue;}
-        out.push({item:{...item,path,readyAt:Math.max(slotFreeAt,locked),ptrOffset:offset},path,score:scoreItem(item,path)});
+        const item=data[idx];
+        // This level is locked until its previous level completes
+        const prereq=prereqFinishTime(path,data,idx);
+        if(prereq>slotFreeAt) continue; // previous level not done yet
+        // Already scheduled this exact level? skip
+        if(labFinishTime[path][labKey(item)]) continue;
+        const readyAt=Math.max(slotFreeAt,prereq);
+        out.push({item:{...item,path,readyAt,globalIdx:idx},path,score:scoreItem(item,path)});
         break;
       }
     });
     return out;
   }
+
   function deepAffordableCandidates(slotFreeAt,day){
     const out=[];
     pathKeys.forEach(path=>{
-      const data=LAB_DATA[path]; const basePtr=ptrs[path]; const seen=new Set();
+      const data=LAB_DATA[path]; const basePtr=ptrs[path]; const seenLab=new Set();
       for(let offset=0;offset<40;offset++){
         const idx=basePtr+offset; if(idx>=data.length)break;
-        const item=data[idx]; const locked=labFinishTime[path][item.lab]||0;
-        if(locked>slotFreeAt){seen.add(item.lab);continue;}
-        if(offset>0){const prev=data[idx-1];if(prev&&prev.lab===item.lab&&!seen.has(item.lab))continue;}
-        if(seen.has(item.lab))continue;
-        seen.add(item.lab);
-        const readyAt=Math.max(slotFreeAt,locked);
-        if(canAffordOnDay(day,item.cost))out.push({item:{...item,path,readyAt,ptrOffset:offset},path,score:scoreItem(item,path)});
+        const item=data[idx];
+        if(seenLab.has(item.lab)) continue; // only one level per lab in candidates
+        const prereq=prereqFinishTime(path,data,idx);
+        if(prereq>slotFreeAt){seenLab.add(item.lab);continue;}
+        if(labFinishTime[path][labKey(item)]) continue;
+        seenLab.add(item.lab);
+        const readyAt=Math.max(slotFreeAt,prereq);
+        if(canAffordOnDay(day,item.cost))out.push({item:{...item,path,readyAt,globalIdx:idx},path,score:scoreItem(item,path)});
       }
     });
     return out;
   }
+
   function econSlotRunning(atTime){return labEvents.some(e=>e.type==='eEcon'&&e.startTime<=atTime&&e.endTime>atTime);}
+
   function pickBestLab(slotFreeAt){
     const slotDay=Math.floor(slotFreeAt/MINS_PER_DAY);
     const econActive=activePriorities.has('econ')&&pathKeys.includes('eEcon');
@@ -686,14 +709,16 @@ function recalculate() {
     if(cpd<=0&&!canAffordOnDay(startDay,item.cost)){freeSlot.finishTime=startDay*MINS_PER_DAY+1;continue;}
     let safety=0;
     while(!canAffordOnDay(startDay,item.cost)){startDay++;if(++safety>365)break;}
-    if(safety>=365)continue; // couldn't afford within a year — skip
+    if(safety>=365){freeSlot.finishTime=(startDay+1)*MINS_PER_DAY;continue;} // couldn't afford — advance slot time and skip
     const startTime=Math.max(startDay*MINS_PER_DAY,item.readyAt);
     const endTime=startTime+actualDuration;
     commitToDay(startDay,item.cost);
     labEvents.push({type:path,slot:freeSlot.id,speed:freeSlot.speed,lab:item.lab,level:item.level,cost:item.cost,duration_min:actualDuration,duration_str:formatMinutes(actualDuration),roi:item.roi,startTime,endTime,startDay});
     freeSlot.finishTime=endTime;
-    labFinishTime[path][item.lab]=endTime;
-    if(item.ptrOffset===0)ptrs[path]++;
+    // Track finish time by lab+level so each level is independent
+    labFinishTime[path][labKey(item)]=endTime;
+    // Advance pointer past this item
+    if(item.globalIdx>=ptrs[path]) ptrs[path]=item.globalIdx+1;
     if(labEvents.length>=150)break;
   }
 
