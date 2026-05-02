@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.3</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.4</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -862,7 +862,7 @@ function recalculate() {
 
   let balance=coins;
   const dayRecords=[];
-  for(let day=0;day<=Math.min(maxDay,90);day++){
+  for(let day=0;day<=Math.min(maxDay,29);day++){
     if(day>0)balance+=cpd;
     const balAfterIncome=balance;
     const todayLabs=(labsByDay[day]||[]).map(e=>{balance=Math.max(0,balance-e.cost);return{...e,balanceAfter:balance};});
