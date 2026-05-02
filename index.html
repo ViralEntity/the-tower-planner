@@ -433,11 +433,26 @@ async function handleRefresh(btn) {
     }
 
     const [econRows, hpRows, regenRows, dmgRows, wsRows] = results;
+
+    setFetchStatus('⏳ Parsing lab data…', 'var(--accent)');
     LAB_DATA.eEcon   = parseLabRows(econRows,  false);
     LAB_DATA.eHP     = parseLabRows(hpRows,    false);
     LAB_DATA.eRegen  = parseLabRows(regenRows, true);
     LAB_DATA.eDamage = parseLabRows(dmgRows,   false);
-    WS_SEQUENCE      = parseWsRows(wsRows);
+
+    setFetchStatus('⏳ Parsing Workshop data…', 'var(--accent)');
+    // Diagnostic: show first row of WS data so we can verify column positions
+    if (wsRows && wsRows.length > 0) {
+      const sample = wsRows.find(r => r && r.length > 0);
+      console.log('WS first data row length:', sample ? sample.length : 0);
+      console.log('WS first data row:', JSON.stringify(sample));
+      console.log('WS total rows:', wsRows.length);
+      // Show in UI temporarily
+      setFetchStatus(`⏳ WS: ${wsRows.length} rows, first row has ${sample ? sample.length : 0} cols — parsing…`, 'var(--accent)');
+    } else {
+      setFetchStatus('⚠ Workshop returned 0 rows — check sheet sharing and tab name', 'var(--accent2)');
+    }
+    WS_SEQUENCE = parseWsRows(wsRows);
 
     const labCount = LAB_DATA.eEcon.length + LAB_DATA.eHP.length + LAB_DATA.eRegen.length + LAB_DATA.eDamage.length;
     dataLoaded = true;
