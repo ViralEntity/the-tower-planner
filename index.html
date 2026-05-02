@@ -611,14 +611,16 @@ function recalculate() {
   function scoreItem(item,path){return item.roi*getPathWeight(path);}
 
   // Get the finish time of the PREVIOUS level of the same lab (prerequisite)
+  // Searches by level number, not array position — handles ROI-sorted data
   function prereqFinishTime(path, data, idx) {
-    if(idx===0) return 0;
-    const prev=data[idx-1];
-    // Only a prereq if same lab name and level is exactly one less
-    if(prev && prev.lab===data[idx].lab) {
-      return labFinishTime[path][labKey(prev)] || 0;
-    }
-    return 0;
+    const item = data[idx];
+    if(item.level <= 1) return 0; // level 1 has no prereq
+    // Find the entry for (same lab, level-1) anywhere in the data
+    const prevLevel = item.level - 1;
+    const prevEntry = data.find(r => r.lab === item.lab && r.level === prevLevel);
+    if(!prevEntry) return 0; // no previous level exists in data — no prereq
+    const ft = labFinishTime[path][labKey(prevEntry)];
+    return ft || 0;
   }
 
   function headCandidates(slotFreeAt){
@@ -628,11 +630,11 @@ function recalculate() {
       for(let offset=0;offset<40;offset++){
         const idx=basePtr+offset; if(idx>=data.length)break;
         const item=data[idx];
-        // This level is locked until its previous level completes
-        const prereq=prereqFinishTime(path,data,idx);
-        if(prereq>slotFreeAt) continue; // previous level not done yet
         // Already scheduled this exact level? skip
         if(labFinishTime[path][labKey(item)]) continue;
+        // This level is locked until its previous level completes
+        const prereq=prereqFinishTime(path,data,idx);
+        if(prereq>slotFreeAt) continue;
         const readyAt=Math.max(slotFreeAt,prereq);
         out.push({item:{...item,path,readyAt,globalIdx:idx},path,score:scoreItem(item,path)});
         break;
@@ -648,10 +650,11 @@ function recalculate() {
       for(let offset=0;offset<40;offset++){
         const idx=basePtr+offset; if(idx>=data.length)break;
         const item=data[idx];
-        if(seenLab.has(item.lab)) continue; // only one level per lab in candidates
+        // Already scheduled this exact level?
+        if(labFinishTime[path][labKey(item)]) continue;
+        if(seenLab.has(item.lab)) continue; // only offer one level per lab at a time
         const prereq=prereqFinishTime(path,data,idx);
         if(prereq>slotFreeAt){seenLab.add(item.lab);continue;}
-        if(labFinishTime[path][labKey(item)]) continue;
         seenLab.add(item.lab);
         const readyAt=Math.max(slotFreeAt,prereq);
         if(canAffordOnDay(day,item.cost))out.push({item:{...item,path,readyAt,globalIdx:idx},path,score:scoreItem(item,path)});
