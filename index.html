@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.8</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.9</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -735,7 +735,6 @@ function recalculate() {
     inProgress: !!(slotStates[i] && (slotStates[i].remainingMins>0 || slotStates[i].unknown)),
   }));
 
-  const ptrs={eEcon:0,eHP:0,eRegen:0,eDamage:0};
   let wsPtr=0;
   const labFinishTime={eEcon:{},eHP:{},eRegen:{},eDamage:{}};
   const labEvents=[];
@@ -758,22 +757,22 @@ function recalculate() {
   }
 
   // Return ALL unclaimed, prereq-satisfied candidates across all paths for a given slot free time.
-  // No break — collect every eligible item so the best ROI wins globally, not per-path.
+  // Scans every item in every active path from scratch each call — ptrs not used.
+  // seenLab key includes path so same-named labs in different paths are independent.
   function allCandidates(slotFreeAt) {
     const out = [];
-    const seenLab = {}; // prevent offering two levels of the same lab simultaneously
+    const seenLab = {}; // path::labName → true, prevents offering two levels of same lab at once
     pathKeys.forEach(path => {
       const data = LAB_DATA[path];
       if (!data || !data.length) return;
       for (let idx = 0; idx < data.length; idx++) {
         const item = data[idx];
         if (isClaimed(path, item)) continue;
-        const labId = path + '::' + item.lab;
-        if (seenLab[labId]) continue; // already offering a level of this lab
-        // Check prereq — previous level must be complete (labFinishTime set) before this starts
+        const labId = path + '::' + item.lab; // path-scoped — same name in different paths is fine
+        if (seenLab[labId]) continue;
         const prereq = prereqFinishTime(path, data, idx);
         if (prereq > slotFreeAt) {
-          seenLab[labId] = true; // this lab is blocked; don't offer higher levels either
+          seenLab[labId] = true; // blocked by prereq — skip higher levels of same lab too
           continue;
         }
         seenLab[labId] = true;
@@ -837,7 +836,6 @@ function recalculate() {
     scheduledKeys.add(path+'::'+labKey(item));
     // labFinishTime used for prereq checks — set to endTime so next level unlocks after this completes
     labFinishTime[path][labKey(item)]=endTime;
-    if(item.globalIdx>=ptrs[path])ptrs[path]=item.globalIdx+1;
     if(labEvents.length>=1000)break;
   }
 
