@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.2</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.3</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -665,6 +665,49 @@ function applySlotOverride(slotIdx) {
   setTimeout(()=>recalculate(),50);
 }
 
+// Apply a lab change from the slot picker dropdown
+function applySlotLabChange(slotIdx) {
+  const sel = document.getElementById(`lab-pick-${slotIdx}`);
+  if (!sel || !sel.value) return;
+  const val = JSON.parse(sel.value); // {lab, level, path}
+  const state = slotStates[slotIdx] || {};
+  slotStates[slotIdx] = { ...state, lab:val.lab, level:val.level, path:val.path,
+    remainingMins:null, unknown:true, manual:true };
+  // Reset time input
+  const inp = document.getElementById(`rem-input-${slotIdx}`);
+  if (inp) { inp.value=''; inp.classList.add('unknown'); }
+  saveSession(buildSession());
+  setTimeout(()=>recalculate(), 50);
+}
+
+// Returns the next available (lowest unscheduled level) for every lab across all paths.
+// "Available" = level 1, OR previous level exists in data but this level is still present.
+// Filters out labs already assigned to other slots.
+function getNextAvailableLabs() {
+  const paths = ['eEcon','eHP','eRegen','eDamage'];
+  const result = []; // [{lab, level, path, cost, duration_str, roi}]
+  // Collect lab names assigned to slots so we can skip them
+  const assignedKeys = new Set(
+    slotStates.filter(Boolean).map(ss => ss ? ss.lab+'::'+ss.level+'::'+ss.path : null).filter(Boolean)
+  );
+  paths.forEach(path => {
+    const data = LAB_DATA[path];
+    if (!data || !data.length) return;
+    // Group by lab name, find the lowest level still in data
+    const labMap = {};
+    data.forEach(item => {
+      if (!labMap[item.lab] || item.level < labMap[item.lab].level) labMap[item.lab] = item;
+    });
+    Object.values(labMap).forEach(item => {
+      const key = item.lab+'::'+item.level+'::'+path;
+      if (!assignedKeys.has(key)) result.push({...item, path});
+    });
+  });
+  // Sort by path then lab name for readability
+  result.sort((a,b)=> a.path.localeCompare(b.path) || a.lab.localeCompare(b.lab));
+  return result;
+}
+
 // ================================================================
 // SCHEDULER
 // ================================================================
@@ -864,17 +907,37 @@ function renderOutput(dayRecords,coins,cpd,numSlots,speeds,targetLab,targetStart
   // ── TODAY — ACTIVE SLOTS ──────────────────────────────────────
   html+=`<div class="section-header">Today — Active Lab Slots</div><div class="today-grid">`;
 
+  // Build available labs list once for all slots (excludes labs in other slots)
+  const availLabs = getNextAvailableLabs();
+  const pathGroupLabel = {eEcon:'Econ',eHP:'EHP',eRegen:'Regen',eDamage:'Dmg'};
+
+  function labPickerHtml(slotIdx) {
+    // Build grouped dropdown of available labs
+    let s = `<select id="lab-pick-${slotIdx}" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:5px 6px;font-family:'Share Tech Mono',monospace;font-size:11px;outline:none;min-width:0">`;
+    s += `<option value="">— Override lab —</option>`;
+    const byPath = {};
+    availLabs.forEach(item => { (byPath[item.path]||(byPath[item.path]=[])).push(item); });
+    Object.entries(byPath).forEach(([path, items]) => {
+      s += `<optgroup label="${pathGroupLabel[path]||path}">`;
+      items.forEach(item => {
+        s += `<option value='${JSON.stringify({lab:item.lab,level:item.level,path})}'>${item.lab} Lv${item.level}</option>`;
+      });
+      s += `</optgroup>`;
+    });
+    s += `</select>`;
+    return s;
+  }
+
   for(let i=0;i<numSlots;i++){
     const ss=slotStates[i];
-    // Find next scheduled lab for this slot
     const nextSched=labEvents.find(e=>e.slot===i+1&&e.startTime===0)||(labEvents.find(e=>e.slot===i+1));
 
     if(ss&&ss.lab){
-      // Slot has an assigned lab (in-progress or manual)
+      // In-progress slot
       const color=TC[ss.path]||'#5b9fff'; const tLabel=TL[ss.path]||ss.path;
       const isUnknown=ss.unknown||ss.remainingMins===null;
-      const remStr=isUnknown?'Unknown':formatDH(ss.remainingMins);
-      const remClass=isUnknown?'warn':'cyan';
+      const remStr=isUnknown?'':formatDH(ss.remainingMins);
+      const remClass=isUnknown?'unknown':'';
       html+=`<div class="slot-card tc-${ss.path||'free'}">
         <div class="sc-header">
           <span class="sc-num">SLOT ${i+1} · ${speeds[i]}x</span>
@@ -883,19 +946,21 @@ function renderOutput(dayRecords,coins,cpd,numSlots,speeds,targetLab,targetStart
         <div class="sc-lab">${ss.lab}</div>
         <div class="sc-level">Level ${ss.level} · <span style="color:var(--accent3);font-size:10px">IN PROGRESS</span></div>
         <div class="sc-meta">
-          <div class="sc-mi"><span class="sc-ml">Remaining</span><span class="sc-mv ${remClass}">${remStr}</span></div>
+          <div class="sc-mi"><span class="sc-ml">Remaining</span><span class="sc-mv ${isUnknown?'warn':'cyan'}">${isUnknown?'Unknown':remStr}</span></div>
           <div class="sc-mi"><span class="sc-ml">Source</span><span class="sc-mv" style="color:var(--muted)">${ss.manual?'Manual':'Auto'}</span></div>
         </div>
         <div class="sc-override">
-          <div class="sc-override-label">Update remaining time</div>
+          <div class="sc-override-label">Remaining time (days &amp; hours)</div>
           <div class="sc-override-row">
-            <input class="sc-rem-input${isUnknown?' unknown':''}" id="rem-input-${i}" value="${isUnknown?'Unknown':remStr}" placeholder="e.g. 2d 4h">
+            <input class="sc-rem-input ${remClass}" id="rem-input-${i}" value="${remStr}" placeholder="e.g. 2d 4hr">
             <button class="sc-apply-btn" onclick="applySlotOverride(${i})">Apply</button>
           </div>
+          <div class="sc-override-label" style="margin-top:8px">Override lab</div>
+          <div class="sc-override-row">${labPickerHtml(i)}<button class="sc-apply-btn" onclick="applySlotLabChange(${i})">Set</button></div>
         </div>
       </div>`;
     } else if(nextSched&&nextSched.startDay===0){
-      // Slot is free and has a lab starting today
+      // Start today slot
       const color=TC[nextSched.type]||'#5b9fff'; const tLabel=TL[nextSched.type]||nextSched.type;
       html+=`<div class="slot-card tc-${nextSched.type}">
         <div class="sc-header">
@@ -910,13 +975,21 @@ function renderOutput(dayRecords,coins,cpd,numSlots,speeds,targetLab,targetStart
           <div class="sc-mi"><span class="sc-ml">ROI/Day</span><span class="sc-mv green">${nextSched.roi.toFixed(4)}</span></div>
           <div class="sc-mi"><span class="sc-ml">Balance After</span><span class="sc-mv gold">${formatCoins(nextSched.balanceAfter!==undefined?nextSched.balanceAfter:0)}</span></div>
         </div>
+        <div class="sc-override">
+          <div class="sc-override-label">Override lab</div>
+          <div class="sc-override-row">${labPickerHtml(i)}<button class="sc-apply-btn" onclick="applySlotLabChange(${i})">Set</button></div>
+        </div>
       </div>`;
     } else {
-      // Free slot, nothing starting today
+      // Free / idle slot
       html+=`<div class="slot-card tc-free">
         <div class="sc-header"><span class="sc-num">SLOT ${i+1} · ${speeds[i]}x</span></div>
         <div class="sc-lab" style="color:var(--muted)">— Idle —</div>
-        <div class="sc-level" style="color:var(--muted)">Nothing scheduled today</div>
+        <div class="sc-level" style="color:var(--muted);margin-bottom:8px">Nothing scheduled today</div>
+        <div class="sc-override">
+          <div class="sc-override-label">Assign lab to slot</div>
+          <div class="sc-override-row">${labPickerHtml(i)}<button class="sc-apply-btn" onclick="applySlotLabChange(${i})">Set</button></div>
+        </div>
       </div>`;
     }
   }
