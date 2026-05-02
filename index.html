@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.6</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.7</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -747,14 +747,14 @@ function recalculate() {
     if(!prev)return 0;
     return labFinishTime[path][labKey(prev)]||0;
   }
-  // score takes path explicitly — item doesn't have .path until after push
   function scoreItem(item, path){ return item.roi * getPathWeight(path); }
 
-  // Track labs currently in-progress (startTime set, endTime in future) to prevent double-scheduling
-  function isLabRunning(path, item) {
-    const key = labKey(item);
-    // Check labEvents for a running instance (started but not yet finished)
-    return labEvents.some(e => e.type===path && e.lab===item.lab && e.level===item.level && e.endTime > 0);
+  // A lab is "already taken" if it appears in labEvents at all (scheduled or running).
+  // labFinishTime is set on completion — use labEvents as the canonical "already claimed" set.
+  const scheduledKeys = new Set(); // "path::lab::level" for every event added
+
+  function isClaimed(path, item){
+    return scheduledKeys.has(path+'::'+labKey(item));
   }
 
   function headCandidates(slotFreeAt){
@@ -764,9 +764,7 @@ function recalculate() {
       for(let off=0;off<40;off++){
         const idx=base+off; if(idx>=data.length)break;
         const item=data[idx];
-        // Skip if already scheduled (running or finished)
-        if(labFinishTime[path][labKey(item)])continue;
-        if(isLabRunning(path,item))continue;
+        if(isClaimed(path,item))continue;
         const prereq=prereqFinishTime(path,data,idx);
         if(prereq>slotFreeAt)continue;
         const readyAt=Math.max(slotFreeAt,prereq);
@@ -784,8 +782,7 @@ function recalculate() {
       for(let off=0;off<40;off++){
         const idx=base+off; if(idx>=data.length)break;
         const item=data[idx];
-        if(labFinishTime[path][labKey(item)])continue;
-        if(isLabRunning(path,item))continue;
+        if(isClaimed(path,item))continue;
         const k=path+'::'+item.lab; if(seenLab[k])continue;
         const prereq=prereqFinishTime(path,data,idx);
         if(prereq>slotFreeAt){seenLab[k]=true;continue;}
@@ -842,6 +839,9 @@ function recalculate() {
     commitToDay(startDay,item.cost);
     labEvents.push({type:path,slot:freeSlot.id,speed:freeSlot.speed,lab:item.lab,level:item.level,cost:item.cost,duration_min:actualDuration,duration_str:formatMinutes(actualDuration),roi:item.roi,startTime,endTime,startDay});
     freeSlot.finishTime=endTime;
+    // Mark as claimed immediately so no other slot picks it
+    scheduledKeys.add(path+'::'+labKey(item));
+    // labFinishTime used for prereq checks — set to endTime so next level unlocks after this completes
     labFinishTime[path][labKey(item)]=endTime;
     if(item.globalIdx>=ptrs[path])ptrs[path]=item.globalIdx+1;
     if(labEvents.length>=1000)break;
