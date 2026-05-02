@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v2.0</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v2.1</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -524,11 +524,21 @@ function parseLabRows(rows, isRegen) {
 function parseWsRows(rows) {
   const out=[];
   if (!rows||rows.length===0)return out;
+  // Rows are returned in sheet order — preserve that order exactly.
+  // Col 16 (Q) = name, col 17 (R) = level (may be "lvl 60"), col 18 (S) = cost (raw number).
+  // Google Sheets API trims trailing empty cells, so a row with data only in Q–S
+  // will have length 17 (indices 0–16) if S is absent, or 19 if all three present.
+  // We require at least col Q (index 16) to have a name.
   for (const row of rows) {
-    if (!row||row.length<17)continue;
-    const name=String(row[16]||'').trim(); if(!name||name.startsWith('='))continue;
-    const level=parseInt(row[17])||0; const cost=parseCoinStr(row.length>18?row[18]:'');
-    if(!cost)continue; out.push({name,level,cost});
+    if (!row) continue;
+    // Pad row to avoid out-of-bounds
+    const r = row.length < 19 ? [...row, ...Array(19).fill('')] : row;
+    const name = String(r[16]||'').trim();
+    if (!name || name.startsWith('=')) continue;
+    const level = parseLevel(r[17]);  // handles "lvl 60", "60", etc.
+    const cost  = parseCoinStr(r[18]);
+    if (!cost) continue;
+    out.push({name, level, cost});
   }
   return out;
 }
