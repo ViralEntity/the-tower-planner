@@ -461,6 +461,771 @@ async function handleRefresh(btn) {
 
     const path = document.getElementById('targetPath').value;
     if (path) populateTargetLab();
+    setFetchStatus('⏳ Calculating schedule…', 'var(--accent)');
+    setTimeout(() => recalculate(), 50); // yield to browser so status update renders first
+
+  } catch(e) {
+    setFetchStatus('⚠ ' + e.message, 'var(--accent2)');
+    document.getElementById('outputArea').innerHTML = `<div class="empty-state"><div class="big">⚠</div>${e.message}<br><br><small>Check your API key and Sheet IDs in ⚙ Settings. Make sure both sheets are shared as "Anyone with the link can view".</small></div>`;
+    btn.textContent = orig; btn.disabled = false;
+  }
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+function parseCoinInput(str) {
+  if (!str) return 0;
+  str = str.trim().replace(/,/g,'');
+  const s = {K:1e3,M:1e6,B:1e9,T:1e12,q:1e15,Q:1e18,s:1e21};
+  for (const [k,v] of Object.entries(s)) if (str.endsWith(k)) return parseFloat(str.slice(0,-1))*v;
+  return parseFloat(str)||0;
+}
+function formatCoins(n) {
+  if (!n||n===0) return '0';
+  const t=[[1e21,'s'],[1e18,'Q'],[1e15,'q'],[1e12,'T'],[1e9,'B'],[1e6,'M'],[1e3,'K']];
+  for (const [v,s] of t) if (Math.abs(n)>=v) { const x=n/v; return (x<10?x.toFixed(2):x<100?x.toFixed(1):Math.round(x))+' '+s; }
+  return Math.round(n).toLocaleString();
+}
+function formatMinutes(mins) {
+  if (mins<=0) return '—';
+  const y=Math.floor(mins/525600); mins-=y*525600;
+  const d=Math.floor(mins/1440); mins-=d*1440;
+  const h=Math.floor(mins/60); const m=mins%60;
+  let s=''; if(y>0)s+=y+'y '; if(d>0)s+=d+'d '; if(h>0)s+=h+'h '; if(m>0||s==='')s+=m+'m';
+  return s.trim();
+}
+function getSlotSpeeds() {
+  const n=parseInt(document.getElementById('numSlots').value); const sp=[];
+  for(let i=0;i<n;i++){const el=document.getElementById(`slot-speed-${i}`);sp.push(el?parseInt(el.value):1);}
+  return sp;
+}
+function togglePriority(p) {
+  if(activePriorities.has(p)){if(activePriorities.size===1)return;activePriorities.delete(p);}
+  else activePriorities.add(p);
+  ['econ','ehp','eregen','damage'].forEach(x=>document.getElementById(`pri-${x}`).classList.toggle('active',activePriorities.has(x)));
+}
+function getActivePaths() {
+  const p=new Set();
+  if(activePriorities.has('econ'))p.add('eEcon');
+  if(activePriorities.has('ehp'))p.add('eHP');
+  if(activePriorities.has('eregen'))p.add('eRegen');
+  if(activePriorities.has('damage'))p.add('eDamage');
+  return [...p];
+}
+function getPathWeight(path){
+  const w={eEcon:0,eHP:0,eRegen:0,eDamage:0};
+  if(activePriorities.has('econ'))w.eEcon=3;
+  if(activePriorities.has('ehp'))w.eHP=3;
+  if(activePriorities.has('eregen'))w.eRegen=3;
+  if(activePriorities.has('damage'))w.eDamage=3;
+  return w[path]||0;
+}
+function buildSlotsGrid() {
+  const n=parseInt(document.getElementById('numSlots').value);
+  const grid=document.getElementById('slotsGrid'); grid.innerHTML='';
+  for(let i=0;i<5;i++){
+    const div=document.createElement('div'); div.className='slot-item';
+    const dis=i>=n;
+    div.innerHTML=`<label>Slot ${i+1}</label><select id="slot-speed-${i}" ${dis?'disabled style="opacity:0.3"':''}>
+      ${[1,2,3,4,5,6,7,8].map(v=>`<option value="${v}" ${v===1?'selected':''}>${v}x</option>`).join('')}</select>`;
+    grid.appendChild(div);
+  }
+}
+document.getElementById('numSlots').addEventListener('change',buildSlotsGrid);
+buildSlotsGrid();
+['currentCoins','coinsPerDay'].forEach(id=>{
+  document.getElementById(id).addEventListener('input',function(){
+    const v=parseCoinInput(this.value);
+    const h=document.getElementById(id==='currentCoins'?'coinHint':'cpdHint');
+    if(h)h.textContent=v>0?'= '+formatCoins(v)+' coins':'';
+  });
+});
+
+function populateTargetLab() {
+  const path=document.getElementById('targetPath').value;
+  const sel=document.getElementById('targetLab'); sel.innerHTML='';
+  if(!path||!LAB_DATA[path]||LAB_DATA[path].length===0){
+    sel.innerHTML=`<option value="">${dataLoaded?'— Choose lab —':'— Load data first —'}</option>`;
+    targetLabSelection=null;document.getElementById('targetInfo').textContent='';return;
+  }
+  sel.innerHTML='<option value="">— Choose lab —</option>';
+  LAB_DATA[path].forEach((item,idx)=>{
+    const opt=document.createElement('option');
+    opt.value=idx; opt.textContent=`${item.lab}  Lv ${item.level}  (${formatCoins(item.cost)})`;
+    sel.appendChild(opt);
+  });
+  targetLabSelection=null; document.getElementById('targetInfo').textContent='';
+}
+function updateTargetInfo() {
+  const path=document.getElementById('targetPath').value;
+  const idx=document.getElementById('targetLab').value;
+  const info=document.getElementById('targetInfo');
+  if(!path||idx===''){targetLabSelection=null;info.textContent='';return;}
+  const item=LAB_DATA[path][parseInt(idx)];
+  targetLabSelection={path,labName:item.lab,level:item.level,cost:item.cost,idx:parseInt(idx)};
+  const coins=parseCoinInput(document.getElementById('currentCoins').value);
+  const cpd=parseCoinInput(document.getElementById('coinsPerDay').value);
+  const d=coins>=item.cost?0:Math.ceil((item.cost-coins)/(cpd||1));
+  info.textContent=`Cost: ${formatCoins(item.cost)} · Duration: ${item.duration_str} · ROI: ${item.roi.toFixed(4)} · ~${d}d to afford`;
+}
+function clearTarget() {
+  document.getElementById('targetPath').value='';
+  document.getElementById('targetLab').innerHTML='<option value="">— Load data first —</option>';
+  targetLabSelection=null; document.getElementById('targetInfo').textContent='';
+}
+
+// ============================================================
+// SCHEDULER
+// ============================================================
+function recalculate() {
+  if(!dataLoaded){setFetchStatus('Load data first.','var(--accent2)');return;}
+  const coins=parseCoinInput(document.getElementById('currentCoins').value);
+  const cpd=parseCoinInput(document.getElementById('coinsPerDay').value);
+  const numSlots=parseInt(document.getElementById('numSlots').value);
+  const speeds=getSlotSpeeds();
+  const MINS_PER_DAY=1440;
+  const pathKeys=getActivePaths();
+  const ptrs={eEcon:0,eHP:0,eRegen:0,eDamage:0};
+  let wsPtr=0;
+  const labFinishTime={eEcon:{},eHP:{},eRegen:{},eDamage:{}};
+  const labEvents=[];
+
+  function scoreItem(item,path){return item.roi*getPathWeight(path);}
+  function headCandidates(slotFreeAt){
+    const out=[];
+    pathKeys.forEach(path=>{
+      const data=LAB_DATA[path]; const basePtr=ptrs[path];
+      for(let offset=0;offset<40;offset++){
+        const idx=basePtr+offset; if(idx>=data.length)break;
+        const item=data[idx]; const locked=labFinishTime[path][item.lab]||0;
+        if(locked>slotFreeAt)continue;
+        if(offset>0){const prev=data[idx-1];if(prev&&prev.lab===item.lab)continue;}
+        out.push({item:{...item,path,readyAt:Math.max(slotFreeAt,locked),ptrOffset:offset},path,score:scoreItem(item,path)});
+        break;
+      }
+    });
+    return out;
+  }
+  function deepAffordableCandidates(slotFreeAt,day){
+    const out=[];
+    pathKeys.forEach(path=>{
+      const data=LAB_DATA[path]; const basePtr=ptrs[path]; const seen=new Set();
+      for(let offset=0;offset<40;offset++){
+        const idx=basePtr+offset; if(idx>=data.length)break;
+        const item=data[idx]; const locked=labFinishTime[path][item.lab]||0;
+        if(locked>slotFreeAt){seen.add(item.lab);continue;}
+        if(offset>0){const prev=data[idx-1];if(prev&&prev.lab===item.lab&&!seen.has(item.lab))continue;}
+        if(seen.has(item.lab))continue;
+        seen.add(item.lab);
+        const readyAt=Math.max(slotFreeAt,locked);
+        if(canAffordOnDay(day,item.cost))out.push({item:{...item,path,readyAt,ptrOffset:offset},path,score:scoreItem(item,path)});
+      }
+    });
+    return out;
+  }
+  function econSlotRunning(atTime){return labEvents.some(e=>e.type==='eEcon'&&e.startTime<=atTime&&e.endTime>atTime);}
+  function pickBestLab(slotFreeAt){
+    const slotDay=Math.floor(slotFreeAt/MINS_PER_DAY);
+    const econActive=activePriorities.has('econ')&&pathKeys.includes('eEcon');
+    if(slotDay===0){
+      const affordable=deepAffordableCandidates(slotFreeAt,0);
+      if(affordable.length>0){
+        affordable.sort((a,b)=>b.score-a.score);
+        if(econActive&&!econSlotRunning(0)){const ec=affordable.filter(c=>c.path==='eEcon');if(ec.length>0)return ec[0];}
+        return affordable[0];
+      }
+      const all=headCandidates(slotFreeAt);
+      if(all.length===0)return null;
+      return all.sort((a,b)=>a.item.cost-b.item.cost)[0];
+    }
+    const heads=headCandidates(slotFreeAt);
+    if(heads.length===0)return null;
+    heads.sort((a,b)=>b.score-a.score);
+    if(econActive&&!econSlotRunning(slotFreeAt)){const ec=heads.filter(c=>c.path==='eEcon');if(ec.length>0)return ec[0];}
+    return heads[0];
+  }
+
+  const slots=Array.from({length:numSlots},(_,i)=>({id:i+1,speed:speeds[i],finishTime:0}));
+  const daySpend={};
+  const dayOpenBalance={0:coins};
+  function getOpenBalance(day){
+    if(day>3650)return 0; // hard cap — never project more than 10 years out
+    let d=Object.keys(dayOpenBalance).map(Number).reduce((a,b)=>a>b?a:b,0);
+    while(d<day){d++;const po=dayOpenBalance[d-1]||0;const ps=daySpend[d-1]||0;dayOpenBalance[d]=Math.max(0,po-ps)+(d===0?0:cpd);}
+    return dayOpenBalance[day]||0;
+  }
+  function canAffordOnDay(day,cost){
+    if(cpd<=0&&coins<=0)return false; // can never afford anything with no coins
+    return(getOpenBalance(day)-(daySpend[day]||0))>=cost;
+  }
+  function commitToDay(day,cost){daySpend[day]=(daySpend[day]||0)+cost;}
+
+  for(let step=0;step<500;step++){
+    const freeSlot=slots.reduce((a,b)=>a.finishTime<=b.finishTime?a:b);
+    const slotFreeAt=freeSlot.finishTime;
+    const pick=pickBestLab(slotFreeAt); if(!pick)break;
+    const{item,path}=pick;
+    const actualDuration=Math.ceil(item.duration_min/freeSlot.speed);
+    let startDay=Math.max(Math.floor(slotFreeAt/MINS_PER_DAY),Math.floor(item.readyAt/MINS_PER_DAY));
+    // If cpd is 0 and current balance can't cover cost, skip this lab entirely
+    if(cpd<=0&&!canAffordOnDay(startDay,item.cost)){freeSlot.finishTime=startDay*MINS_PER_DAY+1;continue;}
+    let safety=0;
+    while(!canAffordOnDay(startDay,item.cost)){startDay++;if(++safety>365)break;}
+    if(safety>=365)continue; // couldn't afford within a year — skip
+    const startTime=Math.max(startDay*MINS_PER_DAY,item.readyAt);
+    const endTime=startTime+actualDuration;
+    commitToDay(startDay,item.cost);
+    labEvents.push({type:path,slot:freeSlot.id,speed:freeSlot.speed,lab:item.lab,level:item.level,cost:item.cost,duration_min:actualDuration,duration_str:formatMinutes(actualDuration),roi:item.roi,startTime,endTime,startDay});
+    freeSlot.finishTime=endTime;
+    labFinishTime[path][item.lab]=endTime;
+    if(item.ptrOffset===0)ptrs[path]++;
+    if(labEvents.length>=150)break;
+  }
+
+  const maxDay=Math.ceil(Math.max(...labEvents.map(e=>e.endTime),MINS_PER_DAY)/MINS_PER_DAY)+2;
+  const labsByDay={};
+  for(const e of labEvents){if(!labsByDay[e.startDay])labsByDay[e.startDay]=[];labsByDay[e.startDay].push(e);}
+  for(const d in labsByDay)labsByDay[d].sort((a,b)=>a.startTime-b.startTime||a.slot-b.slot);
+
+  let targetStartDay=null;
+  if(targetLabSelection){
+    const tgt=labEvents.find(e=>e.lab===targetLabSelection.labName&&e.level===targetLabSelection.level);
+    targetStartDay=tgt?tgt.startDay:null;
+  }
+
+  let balance=coins;
+  const dayRecords=[];
+  for(let day=0;day<=Math.min(maxDay,90);day++){
+    if(day>0)balance+=cpd;
+    const balanceAfterIncome=balance;
+    const todayLabs=(labsByDay[day]||[]).map(e=>{balance=Math.max(0,balance-e.cost);return{...e,balanceAfter:balance};});
+    const todayWS=[];
+    const wsBlocked=targetStartDay!==null&&day<targetStartDay;
+    if(!wsBlocked&&WS_SEQUENCE.length>0){
+      while(wsPtr<WS_SEQUENCE.length){
+        const ws=WS_SEQUENCE[wsPtr];if(balance<ws.cost)break;
+        balance=Math.max(0,balance-ws.cost);
+        todayWS.push({...ws,type:'ws',day,balanceAfter:balance});wsPtr++;
+      }
+    }
+    dayRecords.push({day,incomeAdded:day===0?0:cpd,balanceAfterIncome,balanceEnd:balance,labs:todayLabs,ws:todayWS,wsBlocked});
+    if(day>10&&todayLabs.length===0&&todayWS.length===0&&wsPtr>=WS_SEQUENCE.length)break;
+  }
+
+  renderOutput(dayRecords,coins,cpd,numSlots,speeds,targetLabSelection,targetStartDay);
+}
+
+// ============================================================
+// RENDERER
+// ============================================================
+function renderOutput(dayRecords,coins,cpd,numSlots,speeds,targetLab,targetStartDay){
+  const out=document.getElementById('outputArea');
+  if(!dayRecords||dayRecords.length===0){out.innerHTML=`<div class="empty-state"><div class="big">⚠</div>No labs scheduled. Check coin input and ensure data is loaded.</div>`;return;}
+  const typeLabel={eEcon:'Econ',eHP:'EHP',eRegen:'Regen',eDamage:'Dmg',ws:'WS+'};
+  const typeColor={eEcon:'#ffd700',eHP:'#5b9fff',eRegen:'#3dffa0',eDamage:'#ff5555',ws:'#cc88ff'};
+  const allLabs=dayRecords.flatMap(d=>d.labs);
+  const totalItems=allLabs.length+dayRecords.flatMap(d=>d.ws).length;
+  const slotAssignments={};
+  for(const e of(dayRecords[0]?.labs||[])){if(!slotAssignments[e.slot])slotAssignments[e.slot]=e;}
+  let html='';
+
+  html+=`<div class="status-bar">
+    <div class="sb-item"><span class="sb-label">Starting Coins</span><span class="sb-val gold">${formatCoins(coins)}</span></div>
+    <div class="sb-item"><span class="sb-label">Coins / Day</span><span class="sb-val accent">${formatCoins(cpd)}</span></div>
+    <div class="sb-item"><span class="sb-label">Active Slots</span><span class="sb-val">${numSlots}</span></div>
+    <div class="sb-item"><span class="sb-label">Priority</span><span class="sb-val">${[...activePriorities].map(p=>p.charAt(0).toUpperCase()+p.slice(1)).join(' + ')}</span></div>
+    <div class="sb-item"><span class="sb-label">Items Scheduled</span><span class="sb-val">${totalItems}</span></div>
+  </div>`;
+
+  html+=`<div class="section-header">Active Lab Slots — Start Now</div><div class="slots-output">`;
+  for(let i=1;i<=numSlots;i++){
+    const s=slotAssignments[i];
+    if(s){
+      const color=typeColor[s.type]||'#5b9fff'; const tLabel=typeLabel[s.type]||s.type;
+      html+=`<div class="slot-card type-${s.type}">
+        <div class="slot-num">SLOT ${i} <span class="slot-speed-badge">${speeds[i-1]}x SPEED</span></div>
+        <div class="type-tag">${tLabel}</div>
+        <div class="slot-lab">${s.lab}</div><div class="slot-level">Level → ${s.level}</div>
+        <div class="slot-meta">
+          <div class="meta-item"><div class="meta-label">Cost</div><div class="meta-val cost">${formatCoins(s.cost)}</div></div>
+          <div class="meta-item"><div class="meta-label">Duration</div><div class="meta-val dur">${s.duration_str}</div></div>
+          <div class="meta-item"><div class="meta-label">ROI/Day</div><div class="meta-val roi">${s.roi.toFixed(4)}</div></div>
+          <div class="meta-item"><div class="meta-label">Balance After</div><div class="meta-val roi">${formatCoins(s.balanceAfter)}</div></div>
+        </div></div>`;
+    } else {
+      html+=`<div class="slot-card type-wait"><div class="slot-num">SLOT ${i} <span class="slot-speed-badge">${speeds[i-1]}x</span></div>
+        <div class="slot-lab" style="color:var(--muted)">— Idle —</div><div class="waiting-msg">No labs available</div></div>`;
+    }
+  }
+  html+=`</div>`;
+
+  if(targetLab){
+    const color=typeColor[targetLab.path]||'#fff';
+    const startStr=targetStartDay===null?'Not scheduled — check path is active':targetStartDay===0?'Starts TODAY':`Starts Day ${targetStartDay+1}`;
+    const wsNote=targetStartDay>0?` · WS+ blocked for ${targetStartDay} day${targetStartDay>1?'s':''} to preserve balance`:'';
+    html+=`<div style="border:1px solid ${color};border-left:3px solid ${color};background:${color}10;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <span style="font-family:'Rajdhani',sans-serif;font-size:11px;font-weight:700;letter-spacing:1.5px;color:${color};text-transform:uppercase">🎯 Target Lab</span>
+      <span style="font-weight:500">${targetLab.labName} <span style="color:var(--text2);font-size:11px">Lv ${targetLab.level}</span></span>
+      <span style="font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--gold)">${formatCoins(targetLab.cost)}</span>
+      <span style="font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--accent)">${startStr}</span>
+      ${wsNote?`<span style="font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--muted)">${wsNote}</span>`:''}
+    </div>`;
+  }
+
+  html+=`<div class="section-header" style="margin-top:20px">Full Schedule Timeline — Daily Task List</div>
+  <div class="timeline-wrap"><table class="timeline-table">
+    <thead><tr><th>Day</th><th>Slot</th><th>Type</th><th>Lab / Enhancement</th><th>Lv</th>
+    <th>Cost</th><th>Duration</th><th>ROI/Day</th><th>Start Time</th><th>Balance After</th></tr></thead><tbody>`;
+
+  for(const rec of dayRecords){
+    const{day,incomeAdded,balanceAfterIncome,labs,ws,wsBlocked}=rec;
+    const dayLabel=day===0?'TODAY':`DAY ${day+1}`;
+    const incomeStr=day===0?`Starting balance: ${formatCoins(balanceAfterIncome)}`:`+${formatCoins(incomeAdded)} earned  →  Balance: ${formatCoins(balanceAfterIncome)}`;
+    const blockedNote=wsBlocked?`<span style="font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--accent2);margin-left:12px">🎯 Saving for target — WS+ paused</span>`:'';
+    html+=`<tr class="day-header-row"><td colspan="10"><div class="day-header-inner">
+      <span class="day-label">${dayLabel}</span><span class="day-income">${incomeStr}</span>${blockedNote}
+    </div></td></tr>`;
+    for(const s of labs){
+      const color=typeColor[s.type]||'#5b9fff'; const tLabel=typeLabel[s.type]||s.type;
+      const timeStr=s.startTime===0?'Now':(()=>{const dDay=Math.floor(s.startTime/1440);const mins=s.startTime%1440;return(dDay===day?'':('Day '+(dDay+1)+' '))+(mins>0?formatMinutes(mins):'00:00');})();
+      const isTarget=targetLab&&s.lab===targetLab.labName&&s.level===targetLab.level;
+      const rowStyle=isTarget?` style="background:rgba(255,255,255,0.04);outline:1px solid ${color}40"`:'';
+      html+=`<tr${rowStyle}><td></td>
+        <td style="font-family:'Share Tech Mono',monospace;font-size:11px">S${s.slot}</td>
+        <td><span class="tl-type" style="color:${color};background:${color}18;border:1px solid ${color}30">${tLabel}</span></td>
+        <td class="tl-lab">${s.lab}${isTarget?' 🎯':''}</td>
+        <td style="font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--text2)">${s.level}</td>
+        <td class="tl-cost">${formatCoins(s.cost)}</td><td class="tl-dur">${s.duration_str}</td>
+        <td class="tl-roi">${s.roi.toFixed(4)}</td><td class="tl-time">${timeStr}</td>
+        <td class="tl-balance ok">${formatCoins(s.balanceAfter)}</td></tr>`;
+    }
+    for(const w of ws){
+      html+=`<tr class="ws-row"><td></td>
+        <td style="font-family:'Share Tech Mono',monospace;font-size:11px">—</td>
+        <td><span class="tl-type" style="color:#cc88ff;background:#cc88ff18;border:1px solid #cc88ff30">WS+</span></td>
+        <td class="tl-lab" style="color:var(--ws)">${w.name}</td>
+        <td style="font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--text2)">${w.level}</td>
+        <td class="tl-cost">${formatCoins(w.cost)}</td>
+        <td class="tl-dur" style="color:var(--accent3)">Instant</td>
+        <td class="tl-roi">—</td><td class="tl-time">End of day</td>
+        <td class="tl-balance ok">${formatCoins(w.balanceAfter)}</td></tr>`;
+    }
+    if(labs.length===0&&ws.length===0){
+      html+=`<tr><td></td><td colspan="9" style="color:var(--muted);font-size:11px;font-style:italic;padding:5px 12px">Labs running — no new starts today</td></tr>`;
+    }
+  }
+  html+=`</tbody></table></div>
+  <p class="note" style="margin-top:8px">Daily income applied at day start. Labs listed on start day. WS+ at end of day after lab spending. Balance never goes below 0.</p>`;
+  out.innerHTML=html;
+}
+
+// Init — load saved settings on page load
+loadSettings();
+</script>
+</body>
+</html>  .sb-label{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:0.5px}
+  .sb-val{color:var(--text)}
+  .sb-val.accent{color:var(--accent)}
+  .sb-val.gold{color:var(--gold)}
+
+  /* SLOT CARDS */
+  .slots-output{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:24px}
+  .slot-card{background:var(--bg2);border:1px solid var(--border);padding:14px 16px;position:relative;overflow:hidden}
+  .slot-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+  .slot-card.type-eEcon::before{background:var(--eecon)}
+  .slot-card.type-eHP::before{background:var(--ehp)}
+  .slot-card.type-eRegen::before{background:var(--eregen)}
+  .slot-card.type-eDamage::before{background:var(--edmg)}
+  .slot-card.type-wait::before{background:var(--muted)}
+  .slot-num{font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--muted);margin-bottom:4px;display:flex;justify-content:space-between;align-items:center}
+  .slot-speed-badge{background:rgba(255,255,255,0.06);padding:1px 6px;font-size:10px;border:1px solid var(--border)}
+  .slot-lab{font-family:'Rajdhani',sans-serif;font-size:16px;font-weight:700;color:var(--text);margin-bottom:2px;line-height:1.2}
+  .slot-level{font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--text2);margin-bottom:8px}
+  .slot-meta{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+  .meta-item{font-size:11px;display:flex;flex-direction:column}
+  .meta-label{color:var(--muted);font-size:9px;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:1px}
+  .meta-val{font-family:'Share Tech Mono',monospace;color:var(--text)}
+  .meta-val.cost{color:var(--gold)}
+  .meta-val.dur{color:var(--accent)}
+  .meta-val.roi{color:var(--accent3)}
+  .type-tag{position:absolute;top:10px;right:12px;font-family:'Rajdhani',sans-serif;font-size:10px;font-weight:700;letter-spacing:1px;padding:1px 6px;text-transform:uppercase}
+  .type-eEcon .type-tag{background:rgba(255,215,0,0.1);color:var(--eecon);border:1px solid rgba(255,215,0,0.2)}
+  .type-eHP .type-tag{background:rgba(91,159,255,0.1);color:var(--ehp);border:1px solid rgba(91,159,255,0.2)}
+  .type-eRegen .type-tag{background:rgba(61,255,160,0.1);color:var(--eregen);border:1px solid rgba(61,255,160,0.2)}
+  .type-eDamage .type-tag{background:rgba(255,85,85,0.1);color:var(--edmg);border:1px solid rgba(255,85,85,0.2)}
+  .waiting-msg{font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--muted);padding:4px 0}
+
+  /* SECTION HEADERS */
+  .section-header{font-family:'Rajdhani',sans-serif;font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text2);border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+  .section-header::before{content:'';display:block;width:3px;height:14px;background:var(--accent)}
+
+  /* TIMELINE */
+  .timeline-wrap{background:var(--bg2);border:1px solid var(--border);overflow-x:auto}
+  .timeline-table{width:100%;border-collapse:collapse;font-size:12px}
+  .timeline-table th{background:var(--bg3);color:var(--text2);font-family:'Rajdhani',sans-serif;font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+  .timeline-table td{padding:7px 12px;border-bottom:1px solid rgba(30,45,61,0.5);vertical-align:middle;white-space:nowrap}
+  .tl-lab{font-weight:500}
+  .tl-type{font-family:'Rajdhani',sans-serif;font-size:11px;font-weight:700;padding:2px 6px}
+  .tl-cost{font-family:'Share Tech Mono',monospace;color:var(--gold)}
+  .tl-dur{font-family:'Share Tech Mono',monospace;color:var(--accent)}
+  .tl-roi{font-family:'Share Tech Mono',monospace;color:var(--accent3);font-size:11px}
+  .tl-balance{font-family:'Share Tech Mono',monospace;font-size:11px}
+  .tl-balance.ok{color:#3dffa0}
+  .tl-time{font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--text2)}
+  .ws-row td{background:rgba(204,136,255,0.03)}
+  .day-header-row td{background:rgba(0,212,255,0.04);border-top:1px solid rgba(0,212,255,0.15);border-bottom:1px solid rgba(0,212,255,0.08);padding:6px 12px!important}
+  .day-header-inner{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+  .day-label{font-family:'Rajdhani',sans-serif;font-size:12px;font-weight:700;letter-spacing:1.5px;color:var(--accent);text-transform:uppercase;min-width:50px}
+  .day-income{font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--accent3)}
+  .empty-state{text-align:center;padding:48px;color:var(--muted);font-family:'Share Tech Mono',monospace;font-size:13px;border:1px dashed var(--border);margin-bottom:20px}
+  .empty-state .big{font-size:32px;margin-bottom:12px}
+  .empty-state a{color:var(--accent);text-decoration:none}
+  .note{font-size:11px;color:var(--muted);font-style:italic;margin-top:8px}
+  .fetch-status{font-family:'Share Tech Mono',monospace;font-size:11px;padding:8px 0;min-height:24px}
+  .loading-overlay{text-align:center;padding:32px;font-family:'Share Tech Mono',monospace;font-size:12px;color:var(--accent);border:1px solid var(--border);background:var(--bg2);margin-bottom:20px}
+  .loading-bar{height:2px;background:var(--bg3);margin-top:12px;overflow:hidden}
+  .loading-bar-inner{height:100%;background:var(--accent);animation:loadpulse 1.5s ease-in-out infinite}
+  @keyframes loadpulse{0%{width:0;margin-left:0}50%{width:60%;margin-left:20%}100%{width:0;margin-left:100%}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner</div>
+  <div class="header-btns">
+    <button class="settings-btn" onclick="toggleSettings()">⚙ Settings</button>
+    <button class="refresh-btn" id="refreshBtn" onclick="handleRefresh(this)">⟳ Load Data &amp; Calculate</button>
+  </div>
+</header>
+
+<div class="main">
+
+  <!-- SETTINGS PANEL -->
+  <div class="settings-panel" id="settingsPanel">
+    <div class="settings-title">⚙ Configuration — Google Sheets API</div>
+    <div class="settings-grid">
+      <div class="settings-field">
+        <label>API Key</label>
+        <input type="text" id="cfgApiKey" placeholder="AIzaSy...">
+      </div>
+      <div class="settings-field" style="grid-column:1/-1">
+        <label>Effective Paths Sheet ID</label>
+        <input type="text" id="cfgLabsId" placeholder="1aBcDeFgHiJkLmNoPqRsTuVwXyZ">
+      </div>
+      <div class="settings-field" style="grid-column:1/-1">
+        <label>Workshop Sheet ID</label>
+        <input type="text" id="cfgWsId" placeholder="1xYzAbCdEfGhIjKlMnOpQrStUvWx">
+      </div>
+    </div>
+    <div class="settings-hint">
+      <strong style="color:var(--text)">Finding your Sheet ID:</strong> Open your Google Sheet → look at the URL:<br>
+      <code>docs.google.com/spreadsheets/d/<strong style="color:var(--accent2)">SHEET_ID_IS_HERE</strong>/edit</code><br><br>
+      <strong style="color:var(--text)">API Key:</strong> Go to <code>console.cloud.google.com</code> → APIs &amp; Services → Credentials → Create API Key → restrict it to <em>Google Sheets API</em> only.<br>
+      Your sheets must be shared as <em>"Anyone with the link can view"</em> — they don't need to be fully public.<br><br>
+      <strong style="color:var(--text)">Settings are saved in your browser</strong> and persist across sessions. When your sheets change, just update the IDs here.
+    </div>
+    <div class="settings-actions">
+      <button class="save-btn" onclick="saveSettings()">💾 Save Settings</button>
+      <span class="settings-status" id="settingsStatus"></span>
+    </div>
+  </div>
+
+  <!-- CONFIG -->
+  <div class="config-panel">
+    <div class="config-group">
+      <label>Current Coins</label>
+      <input type="text" id="currentCoins" placeholder="e.g. 50B, 2.5T, 800M">
+      <div class="input-hint" id="coinHint">Enter: 500K · 2.5M · 1B · 4.2T · 1.5q</div>
+    </div>
+    <div class="config-group">
+      <label>Coins per Day</label>
+      <input type="text" id="coinsPerDay" placeholder="e.g. 20M, 500K">
+      <div class="input-hint" id="cpdHint"></div>
+    </div>
+    <div class="config-group">
+      <label>Active Lab Slots</label>
+      <select id="numSlots">
+        <option value="1">1 Slot</option><option value="2">2 Slots</option>
+        <option value="3">3 Slots</option><option value="4">4 Slots</option>
+        <option value="5" selected>5 Slots</option>
+      </select>
+    </div>
+    <div class="config-group">
+      <label>Priority Mode <span style="color:var(--muted);font-size:9px;letter-spacing:0">(multi-select)</span></label>
+      <div class="priority-btns">
+        <button class="pri-btn active" onclick="togglePriority('econ')" id="pri-econ">Econ</button>
+        <button class="pri-btn active" onclick="togglePriority('ehp')" id="pri-ehp">EHP</button>
+        <button class="pri-btn active" onclick="togglePriority('eregen')" id="pri-eregen">eRegen</button>
+        <button class="pri-btn" onclick="togglePriority('damage')" id="pri-damage">Dmg</button>
+      </div>
+    </div>
+    <div class="config-group" style="grid-column:1/-1">
+      <label>Slot Speed Multipliers</label>
+      <div class="slots-grid" id="slotsGrid"></div>
+    </div>
+    <div class="config-group" style="grid-column:1/-1">
+      <label>Target Lab <span style="color:var(--muted);font-size:9px;letter-spacing:0">(prioritise — skips WS+ to save faster)</span></label>
+      <div style="display:flex;gap:8px;align-items:stretch">
+        <select id="targetPath" onchange="populateTargetLab()" style="width:120px;flex-shrink:0">
+          <option value="">— Path —</option>
+          <option value="eEcon">Econ</option><option value="eHP">EHP</option>
+          <option value="eRegen">eRegen</option><option value="eDamage">Dmg</option>
+        </select>
+        <select id="targetLab" onchange="updateTargetInfo()" style="flex:1">
+          <option value="">— Load data first —</option>
+        </select>
+        <button class="refresh-btn" onclick="clearTarget()" style="padding:6px 12px;font-size:11px">✕</button>
+      </div>
+      <div id="targetInfo" class="input-hint" style="margin-top:4px"></div>
+    </div>
+    <div class="config-group" style="grid-column:1/-1">
+      <button class="calc-btn" onclick="recalculate()">Calculate Optimal Lab Schedule</button>
+    </div>
+  </div>
+
+  <div id="fetchStatus" class="fetch-status"></div>
+
+  <!-- OUTPUT -->
+  <div id="outputArea">
+    <div class="empty-state">
+      <div class="big">⚗</div>
+      Click <strong style="color:var(--accent2)">⚙ Settings</strong> to enter your API key and Sheet IDs, then click <strong style="color:var(--accent)">⟳ Load Data &amp; Calculate</strong>.
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ============================================================
+// STATE
+// ============================================================
+let LAB_DATA = { eEcon:[], eHP:[], eRegen:[], eDamage:[] };
+let WS_SEQUENCE = [];
+let dataLoaded = false;
+let activePriorities = new Set(['econ','ehp','eregen']);
+let targetLabSelection = null;
+
+// ============================================================
+// SETTINGS — persisted in localStorage
+// ============================================================
+const LS_KEY = 'tower_planner_config';
+
+function loadSettings() {
+  try {
+    const saved = localStorage.getItem(LS_KEY);
+    if (saved) {
+      const cfg = JSON.parse(saved);
+      if (cfg.apiKey)  document.getElementById('cfgApiKey').value  = cfg.apiKey;
+      if (cfg.labsId)  document.getElementById('cfgLabsId').value  = cfg.labsId;
+      if (cfg.wsId)    document.getElementById('cfgWsId').value    = cfg.wsId;
+    }
+  } catch(e) {}
+}
+
+function saveSettings() {
+  const cfg = {
+    apiKey: document.getElementById('cfgApiKey').value.trim(),
+    labsId: document.getElementById('cfgLabsId').value.trim(),
+    wsId:   document.getElementById('cfgWsId').value.trim(),
+  };
+  if (!cfg.apiKey || !cfg.labsId || !cfg.wsId) {
+    setSettingsStatus('⚠ Fill in all three fields', 'var(--accent2)'); return;
+  }
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(cfg));
+    setSettingsStatus('✓ Saved — click Load Data to fetch', 'var(--accent3)');
+  } catch(e) {
+    setSettingsStatus('⚠ Could not save: ' + e.message, 'var(--accent2)');
+  }
+}
+
+function getConfig() {
+  try {
+    const saved = localStorage.getItem(LS_KEY);
+    return saved ? JSON.parse(saved) : null;
+  } catch(e) { return null; }
+}
+
+function toggleSettings() {
+  document.getElementById('settingsPanel').classList.toggle('open');
+}
+
+function setSettingsStatus(msg, color) {
+  const el = document.getElementById('settingsStatus');
+  el.textContent = msg; el.style.color = color || 'var(--muted)';
+}
+
+function setFetchStatus(msg, color) {
+  const el = document.getElementById('fetchStatus');
+  el.textContent = msg; el.style.color = color || 'var(--muted)';
+}
+
+// ============================================================
+// GOOGLE SHEETS API v4 FETCH
+// Sheets must be shared: "Anyone with the link can view"
+// ============================================================
+
+function sheetsApiUrl(sheetId, range, apiKey) {
+  return `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(range)}?key=${apiKey}`;
+}
+
+async function fetchRange(sheetId, range, apiKey) {
+  const url = sheetsApiUrl(sheetId, range, apiKey);
+  const res = await fetch(url);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const msg = (err.error && err.error.message) || `HTTP ${res.status}`;
+    throw new Error(`Sheets API error for "${range}": ${msg}`);
+  }
+  const data = await res.json();
+  return data.values || [];
+}
+
+// Parse coin strings "2.21 q", "745 B" → raw number
+function parseCoinStr(str) {
+  if (typeof str === 'number') return str;
+  if (!str) return 0;
+  str = String(str).trim();
+  const suffixes = {K:1e3,M:1e6,B:1e9,T:1e12,q:1e15,Q:1e18,s:1e21};
+  for (const [k,v] of Object.entries(suffixes)) {
+    if (str.endsWith(' '+k) || str.endsWith(k)) return parseFloat(str.replace(k,'').trim()) * v;
+  }
+  return parseFloat(str.replace(/,/g,'')) || 0;
+}
+
+// Parse duration "4d 0h 49m" → minutes
+function parseDurStr(str) {
+  if (!str) return 0;
+  str = String(str);
+  let m = 0;
+  const y=str.match(/(\d+)\s*y/); if(y) m+=parseInt(y[1])*525600;
+  const d=str.match(/(\d+)\s*d/); if(d) m+=parseInt(d[1])*1440;
+  const h=str.match(/(\d+)\s*h/); if(h) m+=parseInt(h[1])*60;
+  const mn=str.match(/(\d+)\s*m/); if(mn) m+=parseInt(mn[1]);
+  return m;
+}
+
+// Parse lab tab rows into objects
+// eEcon/eHP/eDamage: Lab=F(col5), Level=G(col6), Cost=H(col7), Dur=I(col8), ROI=J(col9)
+// eRegen:            Lab=D(col3), Level=E(col4), Cost=F(col5), Dur=G(col6), ROI=H(col7)
+// Row 6 = index 5, so we fetch from row 6 onwards
+function parseLabRows(rows, isRegen) {
+  const cL=isRegen?3:5, cLv=isRegen?4:6, cC=isRegen?5:7, cD=isRegen?6:8, cR=isRegen?7:9;
+  const out = [];
+  for (const row of rows) {
+    const lab = String(row[cL]||'').trim();
+    if (!lab || lab.startsWith('=')) continue;
+    const cost = parseCoinStr(row[cC]);
+    const durStr = String(row[cD]||'').trim();
+    const durMin = parseDurStr(durStr);
+    const roi = parseFloat(row[cR]) || 0;
+    const level = parseInt(row[cLv]) || 0;
+    if (!cost && !durMin) continue;
+    out.push({ lab, level, cost, duration_min:durMin, duration_str:durStr||formatMinutes(durMin), roi });
+  }
+  return out;
+}
+
+// Parse WS tab — enhancement sequence starting at col Q (index 16)
+// The API only returns columns up to the last non-empty cell, so rows may be
+// shorter than 19 cols even if the data is in Q:S. We fetch A6:S so the
+// Google Sheets API always pads to the requested width — but if a row has no
+// data in cols Q-S those cells are simply omitted from the array.
+// Safe approach: if row[16] is empty, skip. Never crash on short rows.
+function parseWsRows(rows) {
+  const out = [];
+  if (!rows || rows.length === 0) return out;
+  for (const row of rows) {
+    if (!row || row.length < 17) continue;          // row doesn't reach col Q
+    const name = String(row[16] || '').trim();
+    if (!name || name.startsWith('=')) continue;
+    const level = parseInt(row[17]) || 0;
+    const costRaw = row.length > 18 ? row[18] : '';
+    const cost = parseCoinStr(costRaw);
+    if (!cost) continue;
+    out.push({ name, level, cost });
+  }
+  return out;
+}
+
+async function handleRefresh(btn) {
+  const cfg = getConfig();
+  if (!cfg || !cfg.apiKey || !cfg.labsId || !cfg.wsId) {
+    document.getElementById('settingsPanel').classList.add('open');
+    setFetchStatus('⚠ Enter your API key and Sheet IDs in Settings first', 'var(--accent2)');
+    return;
+  }
+
+  const orig = btn.textContent;
+  btn.textContent = '⏳ Loading...'; btn.disabled = true;
+  document.getElementById('outputArea').innerHTML = `
+    <div class="loading-overlay">⏳ Fetching data from Google Sheets…
+      <div class="loading-bar"><div class="loading-bar-inner"></div></div>
+    </div>`;
+
+  try {
+    // Sequential fetch with per-tab status so we can see exactly where it stalls
+    const tabs = [
+      { label: 'eEcon (1/5)',        sheetId: cfg.labsId, range: 'eEcon!A6:J'         },
+      { label: 'eHP (2/5)',          sheetId: cfg.labsId, range: 'eHP!A6:J'            },
+      { label: 'eRegen (3/5)',       sheetId: cfg.labsId, range: 'eRegen!A6:H'         },
+      { label: 'eDamage (4/5)',      sheetId: cfg.labsId, range: 'eDamage!A6:J'        },
+      { label: 'Workshop (5/5)',     sheetId: cfg.wsId,   range: "'Desired Ratios'!A6:S" },
+    ];
+    const results = [];
+    for (const tab of tabs) {
+      setFetchStatus(`⏳ Fetching ${tab.label}…`, 'var(--accent)');
+      // 15s timeout per tab
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const url = sheetsApiUrl(tab.sheetId, tab.range, cfg.apiKey);
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timer);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          const msg = (err.error && err.error.message) || `HTTP ${res.status}`;
+          throw new Error(`${tab.label}: ${msg}`);
+        }
+        const data = await res.json();
+        results.push(data.values || []);
+      } catch(fetchErr) {
+        clearTimeout(timer);
+        if (fetchErr.name === 'AbortError') throw new Error(`Timed out fetching ${tab.label} — check the sheet tab name exists`);
+        throw fetchErr;
+      }
+    }
+
+    const [econRows, hpRows, regenRows, dmgRows, wsRows] = results;
+
+    setFetchStatus('⏳ Parsing lab data…', 'var(--accent)');
+    LAB_DATA.eEcon   = parseLabRows(econRows,  false);
+    LAB_DATA.eHP     = parseLabRows(hpRows,    false);
+    LAB_DATA.eRegen  = parseLabRows(regenRows, true);
+    LAB_DATA.eDamage = parseLabRows(dmgRows,   false);
+
+    setFetchStatus('⏳ Parsing Workshop data…', 'var(--accent)');
+    // Diagnostic: show first row of WS data so we can verify column positions
+    if (wsRows && wsRows.length > 0) {
+      const sample = wsRows.find(r => r && r.length > 0);
+      console.log('WS first data row length:', sample ? sample.length : 0);
+      console.log('WS first data row:', JSON.stringify(sample));
+      console.log('WS total rows:', wsRows.length);
+      // Show in UI temporarily
+      setFetchStatus(`⏳ WS: ${wsRows.length} rows, first row has ${sample ? sample.length : 0} cols — parsing…`, 'var(--accent)');
+    } else {
+      setFetchStatus('⚠ Workshop returned 0 rows — check sheet sharing and tab name', 'var(--accent2)');
+    }
+    WS_SEQUENCE = parseWsRows(wsRows);
+
+    const labCount = LAB_DATA.eEcon.length + LAB_DATA.eHP.length + LAB_DATA.eRegen.length + LAB_DATA.eDamage.length;
+    dataLoaded = true;
+    setFetchStatus(`✓ Loaded ${labCount} lab entries across 4 paths · ${WS_SEQUENCE.length} WS enhancements`, 'var(--accent3)');
+    btn.textContent = orig; btn.disabled = false;
+
+    const path = document.getElementById('targetPath').value;
+    if (path) populateTargetLab();
     recalculate();
 
   } catch(e) {
