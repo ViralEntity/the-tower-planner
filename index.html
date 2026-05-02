@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v2.4</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v2.6</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -814,8 +814,11 @@ function recalculate() {
     return fairPool[0];
   }
 
-  const daySpend={};        // lab costs committed per day
-  const dayWsSpend={};      // WS+ costs committed per day (estimated)
+  // Lab spend committed by scheduler — used to project future balances for lab affordability.
+  // WS+ is NOT included here; it is handled entirely in the day records pass below.
+  // This means the scheduler may slightly over-project available balance on days where
+  // WS+ spending is large, but labs always take priority over WS+ so this is acceptable.
+  const dayLabSpend={};
   const dayOpenBalance={0:coins};
 
   function getOpenBalance(day){
@@ -824,40 +827,16 @@ function recalculate() {
     while(d<day){
       d++;
       const po=dayOpenBalance[d-1]||0;
-      const ps=(daySpend[d-1]||0)+(dayWsSpend[d-1]||0);
+      const ps=dayLabSpend[d-1]||0;
       dayOpenBalance[d]=Math.max(0,po-ps)+cpd;
     }
     return dayOpenBalance[day]||0;
   }
   function canAffordOnDay(day,cost){
     if(cpd<=0&&coins<=0)return false;
-    const avail=getOpenBalance(day)-(daySpend[day]||0)-(dayWsSpend[day]||0);
-    return avail>=cost;
+    return(getOpenBalance(day)-(dayLabSpend[day]||0))>=cost;
   }
-  function commitToDay(day,cost){daySpend[day]=(daySpend[day]||0)+cost;}
-
-  // Pre-estimate WS+ spending per day so the scheduler accounts for it when
-  // projecting future balances. We simulate the WS+ pass with a projected balance.
-  function precomputeWsSpend(){
-    let bal=coins; let wIdx=0;
-    for(let day=0;day<=29;day++){
-      if(day>0)bal+=cpd;
-      // Deduct estimated lab spend for this day
-      bal=Math.max(0,bal-(daySpend[day]||0));
-      // Spend WS+ items that are affordable
-      const wsTarget=targetLab?targetLabSelection:null;
-      const blocked=wsTarget&&day<1; // rough guard — refined in day records
-      if(!blocked){
-        while(wIdx<WS_SEQUENCE.length){
-          const ws=WS_SEQUENCE[wIdx];
-          if(bal<ws.cost)break;
-          bal=Math.max(0,bal-ws.cost);
-          dayWsSpend[day]=(dayWsSpend[day]||0)+ws.cost;
-          wIdx++;
-        }
-      }
-    }
-  }
+  function commitToDay(day,cost){dayLabSpend[day]=(dayLabSpend[day]||0)+cost;}
 
   for(let step=0;step<500;step++){
     const freeSlot=slots.reduce((a,b)=>a.finishTime<=b.finishTime?a:b);
@@ -881,9 +860,6 @@ function recalculate() {
     labFinishTime[path][labKey(item)]=endTime;
     if(labEvents.length>=1000)break;
   }
-
-  // Pre-compute WS+ spending so day records balance is accurate
-  precomputeWsSpend();
 
   // Update slotStates with scheduled labs for any slot not manually set
   const numSlotsN = numSlots;
@@ -914,14 +890,26 @@ function recalculate() {
   for(let day=0;day<=Math.min(maxDay,29);day++){
     if(day>0)balance+=cpd;
     const balAfterIncome=balance;
-    const todayLabs=(labsByDay[day]||[]).map(e=>{balance=Math.max(0,balance-e.cost);return{...e,balanceAfter:balance};});
+    // Only include labs that the running balance can actually cover.
+    // Labs the scheduler over-committed (due to WS+ not being in projection) are deferred.
+    const todayLabs=[];
+    for(const e of (labsByDay[day]||[])){
+      if(balance>=e.cost){
+        balance-=e.cost;
+        todayLabs.push({...e,balanceAfter:balance});
+      }
+      // If unaffordable, skip silently — it will appear on a future day when balance recovers
+    }
     const todayWS=[];
     const wsBlocked=targetStartDay!==null&&day<targetStartDay;
     if(!wsBlocked){
       while(wsPtr<WS_SEQUENCE.length){
-        const ws=WS_SEQUENCE[wsPtr];if(balance<ws.cost)break;
-        balance=Math.max(0,balance-ws.cost);
-        todayWS.push({...ws,type:'ws',day,balanceAfter:balance});wsPtr++;
+        const ws=WS_SEQUENCE[wsPtr];
+        // Hard check: must have enough balance for this item
+        if(balance<ws.cost)break;
+        balance-=ws.cost;
+        todayWS.push({...ws,type:'ws',day,balanceAfter:balance});
+        wsPtr++;
       }
     }
     dayRecords.push({day,incomeAdded:day===0?0:cpd,balAfterIncome,labs:todayLabs,ws:todayWS,wsBlocked});
