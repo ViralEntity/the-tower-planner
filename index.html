@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.7</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.8</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -757,56 +757,50 @@ function recalculate() {
     return scheduledKeys.has(path+'::'+labKey(item));
   }
 
-  function headCandidates(slotFreeAt){
-    const out=[];
-    pathKeys.forEach(path=>{
-      const data=LAB_DATA[path]; const base=ptrs[path];
-      for(let off=0;off<40;off++){
-        const idx=base+off; if(idx>=data.length)break;
-        const item=data[idx];
-        if(isClaimed(path,item))continue;
-        const prereq=prereqFinishTime(path,data,idx);
-        if(prereq>slotFreeAt)continue;
-        const readyAt=Math.max(slotFreeAt,prereq);
-        out.push({item:{...item,path,readyAt,globalIdx:idx},path,score:scoreItem(item,path)});
-        break;
+  // Return ALL unclaimed, prereq-satisfied candidates across all paths for a given slot free time.
+  // No break — collect every eligible item so the best ROI wins globally, not per-path.
+  function allCandidates(slotFreeAt) {
+    const out = [];
+    const seenLab = {}; // prevent offering two levels of the same lab simultaneously
+    pathKeys.forEach(path => {
+      const data = LAB_DATA[path];
+      if (!data || !data.length) return;
+      for (let idx = 0; idx < data.length; idx++) {
+        const item = data[idx];
+        if (isClaimed(path, item)) continue;
+        const labId = path + '::' + item.lab;
+        if (seenLab[labId]) continue; // already offering a level of this lab
+        // Check prereq — previous level must be complete (labFinishTime set) before this starts
+        const prereq = prereqFinishTime(path, data, idx);
+        if (prereq > slotFreeAt) {
+          seenLab[labId] = true; // this lab is blocked; don't offer higher levels either
+          continue;
+        }
+        seenLab[labId] = true;
+        const readyAt = Math.max(slotFreeAt, prereq);
+        out.push({ item: {...item, path, readyAt, globalIdx: idx}, path, score: scoreItem(item, path) });
       }
     });
     return out;
   }
 
-  function deepAffordable(slotFreeAt,day){
-    const out=[]; const seenLab={};
-    pathKeys.forEach(path=>{
-      const data=LAB_DATA[path]; const base=ptrs[path];
-      for(let off=0;off<40;off++){
-        const idx=base+off; if(idx>=data.length)break;
-        const item=data[idx];
-        if(isClaimed(path,item))continue;
-        const k=path+'::'+item.lab; if(seenLab[k])continue;
-        const prereq=prereqFinishTime(path,data,idx);
-        if(prereq>slotFreeAt){seenLab[k]=true;continue;}
-        seenLab[k]=true;
-        const readyAt=Math.max(slotFreeAt,prereq);
-        if(canAffordOnDay(day,item.cost))out.push({item:{...item,path,readyAt,globalIdx:idx},path,score:scoreItem(item,path)});
+  function pickBestLab(slotFreeAt) {
+    const day = Math.floor(slotFreeAt / MINS_PER_DAY);
+    const candidates = allCandidates(slotFreeAt);
+    if (!candidates.length) return null;
+    // On day 0 prefer affordable items; fallback to cheapest if nothing affordable
+    if (day === 0) {
+      const affordable = candidates.filter(c => canAffordOnDay(0, c.item.cost));
+      if (affordable.length > 0) {
+        affordable.sort((a, b) => b.score - a.score);
+        return affordable[0];
       }
-    });
-    return out;
-  }
-
-  function pickBestLab(slotFreeAt){
-    const day=Math.floor(slotFreeAt/MINS_PER_DAY);
-    if(day===0){
-      const aff=deepAffordable(slotFreeAt,0);
-      if(aff.length>0){aff.sort((a,b)=>b.score-a.score);return aff[0];}
-      const all=headCandidates(slotFreeAt);
-      if(!all.length)return null;
-      return all.sort((a,b)=>a.item.cost-b.item.cost)[0];
+      // Nothing affordable today — return cheapest overall so slot isn't idle
+      candidates.sort((a, b) => a.item.cost - b.item.cost);
+      return candidates[0];
     }
-    const heads=headCandidates(slotFreeAt);
-    if(!heads.length)return null;
-    heads.sort((a,b)=>b.score-a.score);
-    return heads[0];
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0];
   }
 
   const daySpend={};
