@@ -392,19 +392,39 @@ async function handleRefresh(btn) {
     </div>`;
 
   try {
-    setFetchStatus('⏳ Fetching eEcon…', 'var(--accent)');
-    // Fetch each tab: rows 6 onwards. API uses 1-based rows.
-    // eEcon/eHP/eDamage need cols F:J (cols 6-10), eRegen needs D:H (cols 4-8)
-    // WS Desired Ratios needs cols Q:S (cols 17-19) from row 6
-    // We fetch a wide range to cover all columns, then index by position
-    const [econRows, hpRows, regenRows, dmgRows, wsRows] = await Promise.all([
-      fetchRange(cfg.labsId, 'eEcon!A6:J',        cfg.apiKey),
-      fetchRange(cfg.labsId, 'eHP!A6:J',           cfg.apiKey),
-      fetchRange(cfg.labsId, 'eRegen!A6:H',        cfg.apiKey),
-      fetchRange(cfg.labsId, 'eDamage!A6:J',       cfg.apiKey),
-      fetchRange(cfg.wsId,   'Desired Ratios!A6:S', cfg.apiKey),
-    ]);
+    // Sequential fetch with per-tab status so we can see exactly where it stalls
+    const tabs = [
+      { label: 'eEcon (1/5)',        sheetId: cfg.labsId, range: 'eEcon!A6:J'         },
+      { label: 'eHP (2/5)',          sheetId: cfg.labsId, range: 'eHP!A6:J'            },
+      { label: 'eRegen (3/5)',       sheetId: cfg.labsId, range: 'eRegen!A6:H'         },
+      { label: 'eDamage (4/5)',      sheetId: cfg.labsId, range: 'eDamage!A6:J'        },
+      { label: 'Workshop (5/5)',     sheetId: cfg.wsId,   range: 'Desired Ratios!A6:S' },
+    ];
+    const results = [];
+    for (const tab of tabs) {
+      setFetchStatus(`⏳ Fetching ${tab.label}…`, 'var(--accent)');
+      // 15s timeout per tab
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const url = sheetsApiUrl(tab.sheetId, tab.range, cfg.apiKey);
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timer);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          const msg = (err.error && err.error.message) || `HTTP ${res.status}`;
+          throw new Error(`${tab.label}: ${msg}`);
+        }
+        const data = await res.json();
+        results.push(data.values || []);
+      } catch(fetchErr) {
+        clearTimeout(timer);
+        if (fetchErr.name === 'AbortError') throw new Error(`Timed out fetching ${tab.label} — check the sheet tab name exists`);
+        throw fetchErr;
+      }
+    }
 
+    const [econRows, hpRows, regenRows, dmgRows, wsRows] = results;
     LAB_DATA.eEcon   = parseLabRows(econRows,  false);
     LAB_DATA.eHP     = parseLabRows(hpRows,    false);
     LAB_DATA.eRegen  = parseLabRows(regenRows, true);
@@ -422,7 +442,7 @@ async function handleRefresh(btn) {
 
   } catch(e) {
     setFetchStatus('⚠ ' + e.message, 'var(--accent2)');
-    document.getElementById('outputArea').innerHTML = `<div class="empty-state"><div class="big">⚠</div>${e.message}<br><br><small>Check your API key and Sheet IDs in ⚙ Settings. Make sure the sheets are shared as "Anyone with the link can view".</small></div>`;
+    document.getElementById('outputArea').innerHTML = `<div class="empty-state"><div class="big">⚠</div>${e.message}<br><br><small>Check your API key and Sheet IDs in ⚙ Settings. Make sure both sheets are shared as "Anyone with the link can view".</small></div>`;
     btn.textContent = orig; btn.disabled = false;
   }
 }
