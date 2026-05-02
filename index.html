@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v2.3</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v2.4</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -814,19 +814,50 @@ function recalculate() {
     return fairPool[0];
   }
 
-  const daySpend={};
+  const daySpend={};        // lab costs committed per day
+  const dayWsSpend={};      // WS+ costs committed per day (estimated)
   const dayOpenBalance={0:coins};
+
   function getOpenBalance(day){
     if(day>3650)return 0;
     let d=Math.max(...Object.keys(dayOpenBalance).map(Number),0);
-    while(d<day){d++;const po=dayOpenBalance[d-1]||0;const ps=daySpend[d-1]||0;dayOpenBalance[d]=Math.max(0,po-ps)+cpd;}
+    while(d<day){
+      d++;
+      const po=dayOpenBalance[d-1]||0;
+      const ps=(daySpend[d-1]||0)+(dayWsSpend[d-1]||0);
+      dayOpenBalance[d]=Math.max(0,po-ps)+cpd;
+    }
     return dayOpenBalance[day]||0;
   }
   function canAffordOnDay(day,cost){
     if(cpd<=0&&coins<=0)return false;
-    return(getOpenBalance(day)-(daySpend[day]||0))>=cost;
+    const avail=getOpenBalance(day)-(daySpend[day]||0)-(dayWsSpend[day]||0);
+    return avail>=cost;
   }
   function commitToDay(day,cost){daySpend[day]=(daySpend[day]||0)+cost;}
+
+  // Pre-estimate WS+ spending per day so the scheduler accounts for it when
+  // projecting future balances. We simulate the WS+ pass with a projected balance.
+  function precomputeWsSpend(){
+    let bal=coins; let wIdx=0;
+    for(let day=0;day<=29;day++){
+      if(day>0)bal+=cpd;
+      // Deduct estimated lab spend for this day
+      bal=Math.max(0,bal-(daySpend[day]||0));
+      // Spend WS+ items that are affordable
+      const wsTarget=targetLab?targetLabSelection:null;
+      const blocked=wsTarget&&day<1; // rough guard — refined in day records
+      if(!blocked){
+        while(wIdx<WS_SEQUENCE.length){
+          const ws=WS_SEQUENCE[wIdx];
+          if(bal<ws.cost)break;
+          bal=Math.max(0,bal-ws.cost);
+          dayWsSpend[day]=(dayWsSpend[day]||0)+ws.cost;
+          wIdx++;
+        }
+      }
+    }
+  }
 
   for(let step=0;step<500;step++){
     const freeSlot=slots.reduce((a,b)=>a.finishTime<=b.finishTime?a:b);
@@ -850,6 +881,9 @@ function recalculate() {
     labFinishTime[path][labKey(item)]=endTime;
     if(labEvents.length>=1000)break;
   }
+
+  // Pre-compute WS+ spending so day records balance is accurate
+  precomputeWsSpend();
 
   // Update slotStates with scheduled labs for any slot not manually set
   const numSlotsN = numSlots;
