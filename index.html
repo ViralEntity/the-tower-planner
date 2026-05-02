@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.4</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.5</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -833,7 +833,7 @@ function recalculate() {
     freeSlot.finishTime=endTime;
     labFinishTime[path][labKey(item)]=endTime;
     if(item.globalIdx>=ptrs[path])ptrs[path]=item.globalIdx+1;
-    if(labEvents.length>=200)break;
+    if(labEvents.length>=1000)break;
   }
 
   // Update slotStates with scheduled labs for any slot not manually set
@@ -876,7 +876,7 @@ function recalculate() {
       }
     }
     dayRecords.push({day,incomeAdded:day===0?0:cpd,balAfterIncome,labs:todayLabs,ws:todayWS,wsBlocked});
-    if(day>10&&!todayLabs.length&&!todayWS.length&&wsPtr>=WS_SEQUENCE.length)break;
+    if(day>=29&&!todayLabs.length&&!todayWS.length&&wsPtr>=WS_SEQUENCE.length)break;
   }
 
   // Save session after recalc
