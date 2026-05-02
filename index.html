@@ -150,7 +150,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v1.9</span></div>
+  <div class="logo">THE <span>TOWER</span> · Lab Planner <span style="font-size:11px;font-weight:400;color:var(--muted);letter-spacing:1px;margin-left:6px">v2.0</span></div>
   <div class="header-btns">
     <button class="btn btn-muted" onclick="togglePanel('settingsPanel')">⚙ Settings</button>
     <button class="btn btn-muted" onclick="togglePanel('configPanel')">✎ Config</button>
@@ -746,60 +746,67 @@ function recalculate() {
     if(!prev)return 0;
     return labFinishTime[path][labKey(prev)]||0;
   }
-  function scoreItem(item, path){ return item.roi * getPathWeight(path); }
+  // A lab is "already taken" the moment it is scheduled.
+  const scheduledKeys = new Set(); // "path::lab::level"
+  function isClaimed(path, item){ return scheduledKeys.has(path+'::'+labKey(item)); }
 
-  // A lab is "already taken" if it appears in labEvents at all (scheduled or running).
-  // labFinishTime is set on completion — use labEvents as the canonical "already claimed" set.
-  const scheduledKeys = new Set(); // "path::lab::level" for every event added
-
-  function isClaimed(path, item){
-    return scheduledKeys.has(path+'::'+labKey(item));
+  // Return the best unclaimed, prereq-satisfied candidate for a specific path.
+  function bestForPath(path, slotFreeAt) {
+    const data = LAB_DATA[path];
+    if (!data || !data.length) return null;
+    const seenLab = {};
+    let best = null;
+    for (let idx = 0; idx < data.length; idx++) {
+      const item = data[idx];
+      if (isClaimed(path, item)) continue;
+      if (seenLab[item.lab]) continue;
+      const prereq = prereqFinishTime(path, data, idx);
+      if (prereq > slotFreeAt) { seenLab[item.lab] = true; continue; }
+      seenLab[item.lab] = true;
+      const readyAt = Math.max(slotFreeAt, prereq);
+      const candidate = { item: {...item, path, readyAt, globalIdx: idx}, path, score: item.roi };
+      if (!best || candidate.score > best.score) best = candidate;
+    }
+    return best;
   }
 
-  // Return ALL unclaimed, prereq-satisfied candidates across all paths for a given slot free time.
-  // Scans every item in every active path from scratch each call — ptrs not used.
-  // seenLab key includes path so same-named labs in different paths are independent.
-  function allCandidates(slotFreeAt) {
-    const out = [];
-    const seenLab = {}; // path::labName → true, prevents offering two levels of same lab at once
-    pathKeys.forEach(path => {
-      const data = LAB_DATA[path];
-      if (!data || !data.length) return;
-      for (let idx = 0; idx < data.length; idx++) {
-        const item = data[idx];
-        if (isClaimed(path, item)) continue;
-        const labId = path + '::' + item.lab; // path-scoped — same name in different paths is fine
-        if (seenLab[labId]) continue;
-        const prereq = prereqFinishTime(path, data, idx);
-        if (prereq > slotFreeAt) {
-          seenLab[labId] = true; // blocked by prereq — skip higher levels of same lab too
-          continue;
-        }
-        seenLab[labId] = true;
-        const readyAt = Math.max(slotFreeAt, prereq);
-        out.push({ item: {...item, path, readyAt, globalIdx: idx}, path, score: scoreItem(item, path) });
-      }
-    });
-    return out;
+  // Count how many labs from each path are currently running (scheduled but not yet finished)
+  function runningCountByPath() {
+    const counts = {};
+    pathKeys.forEach(p => counts[p] = 0);
+    labEvents.forEach(e => { if (counts[e.type] !== undefined) counts[e.type]++; });
+    return counts;
   }
 
+  // Pick the best lab using fair round-robin allocation across paths.
+  // The path with the fewest currently-running labs gets priority.
+  // Ties broken by the highest ROI item available from each tied path.
   function pickBestLab(slotFreeAt) {
     const day = Math.floor(slotFreeAt / MINS_PER_DAY);
-    const candidates = allCandidates(slotFreeAt);
-    if (!candidates.length) return null;
-    // On day 0 prefer affordable items; fallback to cheapest if nothing affordable
+
+    // Get best candidate for each active path
+    const perPath = [];
+    pathKeys.forEach(path => {
+      const c = bestForPath(path, slotFreeAt);
+      if (c) perPath.push(c);
+    });
+    if (!perPath.length) return null;
+
+    // Filter to affordable on day 0, otherwise all candidates are eligible
+    let pool = perPath;
     if (day === 0) {
-      const affordable = candidates.filter(c => canAffordOnDay(0, c.item.cost));
-      if (affordable.length > 0) {
-        affordable.sort((a, b) => b.score - a.score);
-        return affordable[0];
-      }
-      // Nothing affordable today — return cheapest overall so slot isn't idle
-      candidates.sort((a, b) => a.item.cost - b.item.cost);
-      return candidates[0];
+      const affordable = perPath.filter(c => canAffordOnDay(0, c.item.cost));
+      if (affordable.length > 0) pool = affordable;
+      else { pool.sort((a,b) => a.item.cost - b.item.cost); return pool[0]; }
     }
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates[0];
+
+    // Fair allocation: pick from the path with the fewest scheduled labs so far.
+    // If tied, pick highest ROI among tied paths.
+    const counts = runningCountByPath();
+    const minCount = Math.min(...pool.map(c => counts[c.path] || 0));
+    const fairPool = pool.filter(c => (counts[c.path] || 0) === minCount);
+    fairPool.sort((a, b) => b.score - a.score);
+    return fairPool[0];
   }
 
   const daySpend={};
